@@ -1,0 +1,1435 @@
+## Zeynep Türkyilmaz 419607 M.Sc. Biology ## 
+## Benchmarking of defined biological variant interpretation algorithms ##                           
+## in molecular pathology ##
+
+## Create Test Dataset by aquiring mutation from 15 most mutated genes in cancer studies 
+## infromation about most mutated genes is retrieved from CbioPortal
+## Variants classified as benign/pathogenic are retrieved from CbioPortal or ClinVar
+
+## relevant studies fromCbioPortal are listed in method section 
+## DB = Database; OKB: OncoKB, CV: ClinVar
+
+## START BiomaRt_Dataprep_V3.R #################################################
+
+## install and load libraries required for analysis
+options(scipen=999)
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("biomaRt")
+install.packages("tidyverse")
+
+library(biomaRt)
+library(tidyverse)
+
+## Cbioportal: variants with 15 most mutated genes  
+## TP53,KRAS, APC, PIK3CA, KMT2D,TERT,ARID1A, EGFR, KMT2C, FAT1, PTEN, DNMT3A, NF1, ATM, CDKN2A
+
+## load variants from CbioPortal 
+Ref_Var_CBP <- read.csv('C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/Ref_Datensatz_Variantenbewertung_CBP.csv', 
+                        row.names = NULL, sep = ';',check.names = FALSE) 
+
+## filter for missense mutations & SNPs & Oncogenic 
+Ref_Var_CBP1 <- Ref_Var_CBP %>% 
+  rename("Mutation_Type" = "Mutation Type") %>% 
+  filter(Mutation_Type == "Missense_Mutation") %>%
+  filter(`Variant Type`== "SNP") %>%
+  filter(str_detect(Annotation, "Oncogenic")) ## only include variants with oncogenic annotation 
+
+Ref_Var_CBP2 <- rename(Ref_Var_CBP1,"Clin_Sign_ClinVar" = ClinVar, Protein_Change 
+                       = "Protein Change") %>% 
+  dplyr :: select("Gene", "Protein_Change", "Ref", "Var", "Chromosome", "HGVSc", "HGVSg", 
+                  "Clin_Sign_ClinVar") %>% 
+  rename("Alt" = "Var", "Chr" = "Chromosome") %>%
+  separate(HGVSc, into = c("ensembl_transcript_id", "cDNA"), sep = "\\.[1-9]:" ) %>%  
+  subset(!grepl("\\|", Gene)) %>%
+  unique()
+
+Ref_Var_CBP3 <- Ref_Var_CBP2[!grepl("Protein Change", Ref_Var_CBP2$Protein_Change, 
+                                    ignore.case = TRUE), ]
+
+Ref_Var_CBP3 <- subset(Ref_Var_CBP3, HGVSg != "") %>%
+  separate(HGVSg, into = c("Chro", "HGVSg1"), sep = ":g.") %>%
+  select(-"Chro")
+
+Ref_Var_CBP3 <- Ref_Var_CBP3 %>% 
+  separate(HGVSg1, into = c("HGVSg", "weg"), sep = '[A|T|G|C]>[A|T|G|C]') %>%  
+  select(-"weg") %>%
+  rename("GRCh37Location" = "HGVSg")  
+
+
+Ref_Var_CBP3_hg38 <- read.table("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/hglift/hglft_Ref_Var_CBP3.bed")
+
+Ref_Var_CBP3_hg38 <- Ref_Var_CBP3_hg38 %>%
+  select("V3", "V4") %>%
+  rename(GRCh38Location = V3, GRCh37Location = V4) %>%
+  separate(GRCh37Location, into = c("löschen", "GRCh37Location"), sep = "\\-" ) %>%
+  select(-"löschen")
+
+##joing hglift hg38 annotation with CBP hg19
+Ref_Var_CBP3 <- left_join(Ref_Var_CBP3, Ref_Var_CBP3_hg38, by = "GRCh37Location", relationship = "many-to-many" ) %>%
+  unique()
+
+write.csv(Ref_Var_CBP3,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/Ref_Var_CBP3.csv")
+# Ref_Var_CBP3 <- read.csv("C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/Ref_Var_CBP3.csv", header = header)
+
+###########################################################################################
+## create subset for variants without Ensembl_Transcript_ID 
+## other Info (name, chromosome, position) available
+
+CBP3_no_ENS_ID <-  (Ref_Var_CBP3 %>%
+                      filter(ensembl_transcript_id == "")) 
+
+## Connect to the Ensembl biomart database                             
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl", host = "https://www.ensembl.org")
+
+
+# listEnsemblArchives()
+listFilters(ensembl)
+listAttributes(ensembl)
+
+
+# Define  function to retrieve Ensembl transcript information
+
+get_transcript_info <- function(name, chromosome, position) {
+  
+  # Get the Ensembl gene and transcript IDs for the genomic region
+  
+  genes <- getBM(attributes = c("ensembl_gene_id", "ensembl_transcript_id", "external_gene_name"),#       "external_gene_id", "transcript_mane_select"
+                 filters = c("hgnc_symbol","chromosome_name", "start","end"), ## hgnc = hugo gene name convention 
+                 values = list(name, chromosome, position, position),
+                 mart = ensembl) 
+}
+
+
+transcript_info <- get_transcript_info(Ref_Var_CBP3$Gene, Ref_Var_CBP3$Chr, Ref_Var_CBP3$GRCh38Location)%>%
+  unique()
+
+write.csv(transcript_info,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/transcript_info.csv")
+## transcript_info <- read.csv("C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/transcript_info.csv", 
+#                           header = TRUE, sep = ",", row.names = NULL
+
+#
+## merge Ref_Var_CBP3 and transcript_info  
+
+## convert colnames, so identical between dataframes, e.g. gene und external_gene_id 
+
+colnames(transcript_info)
+# [1] "ensembl_gene_id"       "ensembl_transcript_id" "external_gene_id"    #colnames aufrufen
+
+colnames(transcript_info) <- c( "ensembl_gene_id", "ensembl_transcript_id", "Gene") 
+
+
+CBP3_no_ENS_ID <- CBP3_no_ENS_ID %>%
+  select(-"ensembl_transcript_id")
+
+CBP3_with_ENS_ID <- left_join(CBP3_no_ENS_ID, transcript_info, by = "Gene", relationship = "many-to-many") %>%
+  unique()
+
+## merge subset CBP3 (CBP3_with_ENS_ID) + Ref_Var_CBP3 set 
+Ref_Var_CBP3.1 <- Ref_Var_CBP3 %>%
+  select(-"ensembl_transcript_id") 
+
+## Transcript IDs removed from the original dataset to assign gene IDs,
+## in order to complement all possible transcript IDs through biomaRt
+
+Ref_Var_CBP3.2 <- left_join(Ref_Var_CBP3.1, transcript_info, by = "Gene", relationship = "many-to-many") %>%
+  unique()
+
+
+
+Ref_Var_CBP4 <- left_join(Ref_Var_CBP3.2, CBP3_with_ENS_ID) %>%  
+  ## CBP3_with_ENS_ID has 19 different variants, but many different transcripts
+  filter(ensembl_transcript_id != "") %>% 
+  unique()
+
+##  15 Gene, but 31 versch. Transkripte
+## check for MANETranscript via BiomaRt, see https://www.ncbi.nlm.nih.gov/refseq/MANE/
+
+canon_transcr <- getBM(attributes = c('transcript_is_canonical', 'ensembl_exon_id', 'rank', 'ensembl_gene_id', 'ensembl_transcript_id', 'transcript_mane_select', 'refseq_mrna'), 
+                       filters = 'ensembl_gene_id',
+                       values = Ref_Var_CBP4$ensembl_gene_id, 
+                       mart = ensembl)
+
+canon_transcr_1 <- canon_transcr %>% 
+  select(transcript_is_canonical,ensembl_transcript_id, 
+         ensembl_gene_id, transcript_mane_select, refseq_mrna) %>%
+  unique()
+
+write.csv(canon_transcr_1,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/canon_transcr_1.csv")
+#canon_transcr_1 <- read.csv("C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/canon_transcr_1.csv", 
+#                         header = TRUE, sep = ",", row.names = NULL)
+
+Ref_Var_CBP4.1 <-left_join(Ref_Var_CBP4, canon_transcr_1, relationship = "many-to-many") %>%
+  unique() 
+
+
+Ref_Var_CBP4.1 <- write.csv(Ref_Var_CBP4.1, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/Ref_Var_CBP4.1.csv", row.names = FALSE)  ## row.names = NULL 
+
+
+Ref_Var_CBP4.1 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/Ref_Var_CBP4.1.csv") 
+
+
+## delete dataframes, where information is redundant from this point on
+rm(Ref_Var_CBP, Ref_Var_CBP1, Ref_Var_CBP2, Ref_Var_CBP3, Ref_Var_CBP3.1, Ref_Var_CBP3.2, 
+   Ref_Var_CBP4, CBP3_no_ENS_ID, CBP3_with_ENS_ID, canon_transcr, canon_transcr_1, transcript_info)
+
+
+
+Ref_Var_CV <- read.csv('C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/Ref_Datensatz_Variantenbewertung_CV.csv', 
+                       row.names = NULL, sep = ';',check.names = FALSE)
+
+### extract Ref & ALT from ClinVar-  canonical spdi 
+Ref_Var_CV_split <- Ref_Var_CV %>%
+  mutate(strsplit(Ref_Var_CV$`Canonical SPDI`, ":")) %>%
+  rename(split_data = "strsplit(Ref_Var_CV$`Canonical SPDI`, \":\")" ) %>%
+  
+  mutate(Ref = sapply(split_data, function(x) substr(x[3], 1, 1))) %>%
+  mutate(Alt = sapply(split_data, function(x) substr(x[4], 1, 1))) %>%
+  dplyr :: select(-split_data)
+
+
+
+Ref_Var_CV_IDd <- Ref_Var_CV_split %>% mutate(hg38_ID = str_c(GRCh38Chromosome, GRCh38Location, sep = ':')) ### Create offset for re-merging
+
+
+Ref_Var_CV1 <- rename(Ref_Var_CV_IDd, "Clin_Sign_ClinVar" = "Clinical significance (Last reviewed)", "Gene" = "Gene(s)") %>%
+  separate(Name, into = c("HGVSc_RefSeq", "Protein_Change"), sep = " ") %>%   
+  separate(HGVSc_RefSeq, into = c("HGVSc_ID", "cDNA"), sep = "\\):") %>%   ## separate HGVSc ID and cDNA 
+  separate(HGVSc_ID, into = c("HGVSc_ID1", "delete_this"), sep = "\\.") %>%
+  dplyr::select("HGVSc_ID1", "Gene", "Protein_Change", "Ref", "Alt", 
+                "cDNA","GRCh37Location","GRCh38Location", "Clin_Sign_ClinVar","Review status",
+                "Canonical SPDI", "hg38_ID", -"delete_this") %>%
+  na.omit(CDNA) %>% ## keep only coding variants 
+  subset(!grepl("\\|", Gene)) %>% ## substract variants that are located on gene boarders 
+  subset(!grepl("fs", Protein_Change)) %>% ## substract frameshift variants
+  subset(!grepl("=", Protein_Change)) %>% ## delete silent variants
+  filter(grepl("\\(p\\.[A-Za-z]+\\d+[A-Za-z]+\\)|p\\.[A-Za-z]+\\d+[A-Za-z]+", Protein_Change))%>% 
+  filter(str_detect(Clin_Sign_ClinVar, "(benign|Benign)")) %>%
+  unique()
+
+
+#### Prepare dataset for variants from ClinVAR: "Ref_Var_CV"
+
+# Define the dataset and attributes you want to retrieve
+ensembl = useMart("ENSEMBL_MART_ENSEMBL", host = "https://www.ensembl.org", 
+                  dataset = "hsapiens_gene_ensembl")
+
+#convert RefSeq coding transcript into Ensembl coding transcript with biomaRt
+
+listFilters(ensembl)
+# listAttributes(ensembl)
+
+# Define  RefSeq ID
+refseq_id <- Ref_Var_CV1$HGVSc_ID1 %>% unique()
+
+# Get the Ensembl transcript ID
+transcript_info_CV <- getBM(attributes = c("ensembl_transcript_id", "refseq_mrna"),
+                            filters = "refseq_mrna",
+                            values = refseq_id,
+                            mart = ensembl)
+
+write.csv(transcript_info_CV,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/transcript_info_CV.csv")
+## transcript_info_CV <- read.csv("C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/transcript_info_CV.csv", 
+#                           header = TRUE, sep = ",", row.names = NULL
+
+##### merge back together
+
+colnames(Ref_Var_CV1)
+# [1] "HGVSc_ID1"         "Gene"              "Protein_Change"    "Ref"               "Alt"               "cDNA"              "GRCh37Location"    "GRCh38Location"   
+# "Clin_Sign_ClinVar" "Review status"     "Canonical SPDI"    "hg38_ID"  
+
+
+colnames(Ref_Var_CV1) <- c("HGVSc_ID", "Gene", "Protein_Change", "Ref", "Alt", "cDNA", "GRCh37Location", "GRCh38Location", 
+                           "Clin_Sign_ClinVar", "Review status", "Canonical SPDI", "hg38_ID" )
+
+colnames(transcript_info_CV)
+# [1] "ensembl_transcript_id" "refseq_mrna" 
+
+
+colnames(transcript_info_CV) <- c( "ensembl_transcript_id", "HGVSc_ID") #überschrift columns ändern 
+
+colnames(transcript_info_CV)
+# [1] "HGVSc_RefSeq"          "Ensembl_Transcript_ID"
+
+Ref_Var_CV2 <- left_join(Ref_Var_CV1, transcript_info_CV, by = 'HGVSc_ID', relationship = "many-to-many") %>%
+  unique()
+
+
+#  alternative biomaRt attribute query: 'transcript_is_canonical' 
+canon_transcr_CV <- getBM(attributes = c('transcript_is_canonical', 'ensembl_exon_id', 'rank', 'ensembl_gene_id', 'ensembl_transcript_id', "chromosome_name", "transcript_mane_select", "refseq_mrna" ), 
+                          filters = 'ensembl_transcript_id',
+                          values = Ref_Var_CV2$ensembl_transcript_id,
+                          mart = ensembl)
+
+
+canon_transcr_CV_1 <- canon_transcr_CV %>% 
+  #  select(transcript_is_canonical,ensembl_transcript_id, ensembl_gene_id, chromosome_name,transcript_mane_select, refseq_mrna)
+  dplyr::select(transcript_is_canonical,ensembl_transcript_id, ensembl_gene_id, chromosome_name,transcript_mane_select)
+
+canon_transcr_CV_1 <- canon_transcr_CV_1  %>%
+  unique()
+
+Ref_Var_CV2.1 <-left_join(Ref_Var_CV2, canon_transcr_CV_1, relationship = "many-to-many") %>%
+  rename(Chr = chromosome_name, refseq_mrna = HGVSc_ID) %>%
+  #select(-"HGVSc_ID") %>%
+  unique()
+
+
+Ref_Var_CV2.1$GRCh37Location <- as.numeric(Ref_Var_CV2.1$GRCh37Location)
+Ref_Var_CV2.1$Chr <- as.numeric(Ref_Var_CV2.1$Chr)
+
+## conversion to 1-letter Code für homogenity und OKB query            
+## function adapted from: https://stackoverflow.com/questions/34296400/1-letter-amino-acid-variant-to-3-letter
+
+Ref_Var_CV2.1$Protein_Change <- gsub("\\(p.", " ", Ref_Var_CV2.1$Protein_Change) ## (p.) loswerden als prep für konvert. in 3 buchstaben code 
+Ref_Var_CV2.1$Protein_Change <- gsub("\\)", " ", Ref_Var_CV2.1$Protein_Change)  
+
+# 1 and 3 letter Code
+code3 <- c("Ala", "Arg", "Asn", "Asp", "Cys", "Glu", "Gln", "Gly", "His", 
+           "Ile", "Leu", "Lys", "Met", "Phe", "Pro", "Ser", "Thr", "Trp", 
+           "Tyr", "Val")
+code1 <- c("A", "R", "N", "D", "C", "E", "Q", "G", "H", "I", "L", "K", 
+           "M", "F", "P", "S", "T", "W", "Y", "V")
+
+## convert 3 letter code to 1 letter code:
+for (i in 1:length(code3))
+{
+  Ref_Var_CV2.1$Protein_Change <- gsub(code3[i],code1[i], Ref_Var_CV2.1$Protein_Change,ignore.case=TRUE)
+}
+
+Ref_Var_CV2.1$GRCh38Location <- as.numeric(Ref_Var_CV2.1$GRCh38Location)
+Ref_Var_CV2.1$Chr <- as.character(Ref_Var_CV2.1$Chr)
+
+write.csv(Ref_Var_CV2.1, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/Ref_Var_CV2.1.csv")
+
+
+
+## rm(Ref_Var_CV, Ref_Var_CV1, Ref_Var_CV2, canon_transcr_CV, canon_transcr_CV_1)
+
+
+
+Ref_Var_CBP4.1$GRCh37Location <- as.numeric(Ref_Var_CBP4.1$GRCh37Location)
+Ref_Var_CV2.1$Chr <- as.character(Ref_Var_CV2.1$Chr)
+
+
+
+## merge datasets from ClinVar und cbioPortal ##
+
+colnames(Ref_Var_CBP4.1)
+#[1] "Gene"                    "Protein_Change"          "Ref"                     "Alt"                    
+#[5] "Chr"                     "cDNA"                    "GRCh37Location"          "Clin_Sign_ClinVar"      
+#[9] "GRCh38Location"          "ensembl_gene_id"         "ensembl_transcript_id"   "transcript_is_canonical"
+#[13] "transcript_mane_select"  "refseq_mrna" 
+
+colnames(Ref_Var_CV2.1)
+#[1] "Gene"                    "Protein_Change"          "HGVSc_ID"                "Clin_Sign_ClinVar"      
+#[5] "cDNA"                    "GRCh37Location"          "GRCh38Location"          "Canonical SPDI"         
+#[9] "hg38_ID"                 "ensembl_transcript_id"   "transcript_is_canonical" "ensembl_gene_id"        
+#[13] "Chr"                     "transcript_mane_select" 
+
+Ref_Var_CBP4.1$Chr <- as.character(Ref_Var_CBP4.1$Chr)
+
+joined_df <- full_join(Ref_Var_CV2.1, Ref_Var_CBP4.1) %>%
+  dplyr::select(-"refseq_mrna")%>%
+  filter(transcript_is_canonical == 1) %>%
+  subset(grepl(TRUE, !is.na(GRCh37Location)))%>%
+  subset(grepl(TRUE, !is.na(GRCh38Location)))%>%
+  subset(!grepl("Ter", Protein_Change))%>%
+  unique() %>% filter(!GRCh37Location == '') 
+
+
+
+colnames(joined_df)
+
+joined_df$GRCh37Location <- as.numeric(joined_df$GRCh37Location)
+joined_df$GRCh38Location <- as.numeric(joined_df$GRCh38Location)
+
+
+## rm(Ref_Var_CBP4.1, Ref_Var_CV2.1) 
+
+## add adjustments from Test_joineddf.R 
+joined_df$Protein_Change <- trimws(joined_df$Protein_Change)
+
+joined_df <-  joined_df %>% 
+  mutate(identifier = str_c(Gene, Chr, GRCh38Location, Ref, Alt, sep = ':' ))
+
+count_identifier <- joined_df %>% dplyr :: select(identifier) %>% unique() 
+
+##identifier + protein change
+joined_df <-  joined_df %>% 
+  mutate(identifier_1 = str_c(Gene, Chr, GRCh38Location, Ref, Alt, Protein_Change, sep = ':' ))
+
+count_identifier_1 <- joined_df %>% dplyr ::select(identifier_1) %>% 
+  unique()  
+
+count_identifier_1$identifier_1  <-  str_remove(count_identifier_1$identifier_1 ,"(:[A-Z][0-9]*[A-Z])") 
+
+colnames(count_identifier_1) <- c('identifier')                                          
+colnames(count_identifier_1)
+
+
+
+
+##identifier antijoin
+
+ident_anti <- anti_join(count_identifier_1, count_identifier) %>% as.data.frame()
+
+##filter out rows with same identifier  = same variant 
+getRowsWithSameIdentifier <- function(dataframe, identifier_column) {
+  
+  
+  result <- dataframe %>%
+    group_by_at(vars(identifier_column)) %>%
+    filter(n() > 1) %>%
+    ungroup()
+  
+  return(result)
+}
+
+
+RowsWithSameIdentifier <- getRowsWithSameIdentifier(joined_df, "identifier")
+
+Rows_Unique_Identifier <- RowsWithSameIdentifier %>%   
+  filter(is.na(`Review status`)) %>%
+  unique()
+
+joined_df <- anti_join(joined_df, Rows_Unique_Identifier) %>%
+  subset(!grepl("C607delinsWCFKK", Protein_Change)) ## = ident_anti: C607delinsWCFKK
+
+
+write.csv(joined_df, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df.csv")
+
+#################################################### End BiomaRt_Dataprep_V3.R
+
+## START BiomaRt_Abfrage_V2.R #################################################
+
+################################################################################
+## Abfrage von joined_df
+# joined_df <- 
+ # read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df.csv", 
+    #       row.names = 1) %>% unique()
+
+#################################################################################
+
+## canonical Ensembl IDs
+Enst_canonical <- c("ENST00000269305", "ENST00000311936", "ENST00000257430", 
+                    "ENST00000263967", "ENST00000301067", "ENST00000310581", 
+                    "ENST00000324856", "ENST00000275493", "ENST00000262189", 
+                    "ENST00000441802", "ENST00000371953", "ENST00000304494",
+                    "ENST00000321117", "ENST00000358273", "ENST00000675843")
+
+
+############### check for correct genes and transcript IDs 
+ensembl = useMart("ENSEMBL_MART_ENSEMBL", host = "www.ensembl.org", 
+                  dataset = "hsapiens_gene_ensembl")
+
+
+# List of Ensembl transcript IDs
+transcript_ids <-  c("ENST00000269305", "ENST00000311936", "ENST00000257430", 
+                     "ENST00000263967", "ENST00000301067", "ENST00000310581", 
+                     "ENST00000324856", "ENST00000275493", "ENST00000262189", 
+                     "ENST00000441802", "ENST00000371953", "ENST00000304494",
+                     "ENST00000321117", "ENST00000358273", "ENST00000675843")
+
+# Get the gene names for the given transcript IDs
+gene_names <- getBM(attributes = c("ensembl_transcript_id", "external_gene_name"),
+                    filters = "ensembl_transcript_id", 
+                    values = transcript_ids,
+                    mart = ensembl)
+
+print(gene_names)
+
+################## Test confirmed, correct genes 
+
+## check if transcript ID is canonical? 
+setequal(Enst_canonical, transcript_ids)
+#[1] TRUE
+
+
+ensembl = useMart("ENSEMBL_MART_ENSEMBL", host = "www.ensembl.org", 
+                  dataset = "hsapiens_gene_ensembl")
+
+#listAttributes(ensembl_hg19)
+# listFilters(ensembl)
+
+exon_table <- getBM(attributes = c('exon_chrom_start', 'exon_chrom_end', 
+                                   'ensembl_exon_id', 'rank', 'ensembl_gene_id', 
+                                   'strand', 'ensembl_transcript_id'),
+                    filters = 'ensembl_transcript_id',
+                    values = joined_df$ensembl_transcript_id,
+                    mart = ensembl)
+
+
+exon_table <- exon_table %>%
+  unique()
+#[1] "ENST00000257430" "ENST00000269305" "ENST00000311936" "ENST00000263967" "ENST00000301067"
+#[6] "ENST00000310581" "ENST00000262189" "ENST00000275493" "ENST00000324856" "ENST00000321117"
+#[11] "ENST00000358273" "ENST00000371953" "ENST00000441802" "ENST00000304494" "ENST00000675843"
+
+## check if exon table as expected
+
+## 15 top mutated genes: TP53,KRAS, APC, PIK3CA, KMT2D,TERT,
+## ARID1A, EGFR, KMT2C, FAT1, PTEN, DNMT3A, NF1, ATM, CDKN2A
+unique(exon_table$ensembl_transcript_id)
+
+#[1] "ENST00000257430" "ENST00000269305" "ENST00000311936" "ENST00000263967" "ENST00000301067"
+#[6] "ENST00000310581" "ENST00000262189" "ENST00000275493" "ENST00000324856" "ENST00000321117"
+#[11] "ENST00000358273" "ENST00000371953" "ENST00000441802" "ENST00000304494" "ENST00000675843"
+
+############ test alle gene da 
+ensembl_transcript_ids <- c( "ENST00000257430", "ENST00000269305", "ENST00000311936",
+                             "ENST00000263967", "ENST00000301067", "ENST00000310581", 
+                             "ENST00000262189" ,"ENST00000275493" ,"ENST00000324856",
+                             "ENST00000321117", "ENST00000358273","ENST00000371953",
+                             "ENST00000441802", "ENST00000304494", "ENST00000675843")
+
+
+# Get the gene names for the given transcript IDs
+gene_names <- getBM(attributes = c("ensembl_transcript_id", "external_gene_name"),
+                    filters = "ensembl_transcript_id", 
+                    values = ensembl_transcript_ids,
+                    mart = ensembl)
+print(gene_names)
+
+########### test ende alle da
+
+
+## test if transcript ID is canonical? 
+setequal(Enst_canonical,ensembl_transcript_ids)
+#[1] TRUE
+
+###########
+
+colnames(exon_table) # "exon_chrom_start" "exon_chrom_end"   "ensembl_exon_id"  
+# "rank" "ensembl_gene_id"  "strand" "ensembl_transcript_id"
+
+
+colnames(joined_df) # "Gene","Protein_Change", "HGVSc_ID","Clin_Sign_ClinVar",
+# "cDNA","Ensembl_Transcript_ID","Chr","HGVSg","ensembl_gene_id"  
+
+
+## extract 1st rank and highest rank per gene 
+## sllos to check if variant is first/last exon 
+## can be relevant in assessment of variants 
+
+exon_table_1st_Exon <- exon_table %>%
+  filter(exon_table$rank == 1)
+
+exon_table_last_Exon <- exon_table %>% 
+  group_by(ensembl_gene_id) %>%
+  top_n(1, rank)
+
+#########################################################################################################################
+
+## test schreiben für versch. Gene. Exon 1 unter Beachtung strang (+/-)
+##danach für letztes Exon (df mit # exons je Gen, durch ENST abrufbar)
+
+# Write test for genes. Note: Exon 1 considering strand (+/-), 
+# then for the last exon (data frame with # exons per gene, retrievable by ENST)
+
+colnames(joined_df)
+# "Gene"                    "Protein_Change"          "HGVSc_ID"                "Clin_Sign_ClinVar"       "cDNA"                   
+#"GRCh37Location"          "GRCh38Location"          "ensembl_transcript_id"   "transcript_is_canonical" "ensembl_gene_id"        
+# "Chr" 
+
+## 1st exon
+joined_df1 <- joined_df %>% 
+  left_join(., exon_table_1st_Exon, by = c('ensembl_transcript_id', 'ensembl_gene_id'), 
+            relationship = "many-to-many") %>% 
+  mutate(is_first_exon = ifelse(GRCh37Location >= exon_chrom_start & GRCh37Location <= exon_chrom_end, TRUE, FALSE)) %>% 
+  dplyr:: select(!c("exon_chrom_start", "exon_chrom_end", "ensembl_exon_id", "rank", "strand")) %>%
+  unique()
+
+colnames(exon_table_last_Exon)
+
+joined_df2 <- joined_df1 %>% 
+  left_join(., exon_table_last_Exon, by = c('ensembl_transcript_id', 'ensembl_gene_id'), 
+            relationship = "many-to-many") %>% 
+  mutate(is_last_exon = ifelse(GRCh37Location >= exon_chrom_start & GRCh37Location <= exon_chrom_end, TRUE, FALSE)) %>% 
+  unique()
+
+
+## check for exon borders, exon_chrom_start & exon_chrom_end +2 basen ## exon border = start +(1-2), end -(1-2) pro exon/rank
+joined_df3 <- joined_df2 %>% 
+  left_join(., exon_table, relationship = "many-to-many") %>%
+  unique()%>%
+  rowwise() %>%
+  mutate(is_exon_border = ifelse(GRCh37Location %in% seq(exon_chrom_start, exon_chrom_start+2) |
+                                   GRCh37Location %in% seq(exon_chrom_end-2, exon_chrom_end), TRUE, FALSE)) 
+
+## remove white spaces in joined_df3$Protein_Change 
+joined_df3$Protein_Change <- trimws(joined_df3$Protein_Change)
+
+write.csv(joined_df3, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df3.csv")
+joined_df3 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df3.csv", header = TRUE, row.names = 1)
+
+## OncoKB 
+
+## query for  Oncogenic und Mutation Effect 
+OKB_Ref <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/OKB_Ref.csv", sep = ";")
+
+OKB_Ref <- OKB_Ref %>%
+  rename(Protein_Change = Alteration, Gene = Gen)
+
+
+joined_df4 <- left_join(joined_df3, OKB_Ref, by = c("Protein_Change", "Gene")) 
+
+## quers info function gene (Oncogen/Ts) 
+OKB_cancer_genes <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/OKB_cancerGeneList_1.csv", header = TRUE, sep = ";")
+## download 31.10.2023
+
+OKB_cancer_genes <- OKB_cancer_genes %>%
+  dplyr::select(c(Hugo_Symbol, Is_Oncogene, Is_Tumor_Suppressor_Gene))%>%
+  rename(Gene = Hugo_Symbol)
+
+joined_df5 <- left_join(joined_df4,OKB_cancer_genes, by = "Gene") 
+
+write.csv(joined_df5, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df5.csv")
+## joined_df5 <- read.csv("C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/joined_df5.csv", header = TRUE, row.names = 1)
+
+############# ISB TP53 ########################## ISB TP53 #####################
+TP53_DB_Ref <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/TP53_DB_Ref.csv", sep = ",")
+## download 31.10.2023
+
+colnames(TP53_DB_Ref)
+
+TP53_DB_Ref <- TP53_DB_Ref %>%
+dplyr::select(c_description, hg19_Chr17_coordinates, TransactivationClass, DNE_LOFclass, AGVGDClass) %>%  
+  rename(GRCh37Location = hg19_Chr17_coordinates, cDNA = c_description)
+
+joined_df6 <- left_join(joined_df5, TP53_DB_Ref, by = c("cDNA", "GRCh37Location")) %>%
+  unique() 
+
+
+write.csv(joined_df6,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df6.csv")
+## joined_df6 <- read.csv("C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/joined_df6.csv", header = TRUE, row.names = 1)
+
+########### ClinVar ######################## ClinVar ###########################
+
+## INFO=<ID=CLNSIG,Number=.,Type=String,Description="Clinical significance for 
+# this single variant; multiple values are separated by a vertical bar">
+
+## INFO=<ID=CLNREVSTAT,Number=.,Type=String,Description="ClinVar review status 
+# for the Variation ID">
+
+##  CLNREVSTAT documentation: https://www.ncbi.nlm.nih.gov/clinvar/docs/review_status/
+
+
+#`%ni%` <- Negate(`%in%`)
+
+ClinVar_DB <- read_tsv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/clinvar_export_20231122.tsv", col_names = FALSE, show_col_types = FALSE)
+
+ClinVar_DB <- ClinVar_DB %>%
+  rename("Chr" = "X1", "GRCh38Location"= "X2",Ref = "X3",Alt = "X4",CLNSIG = "X5",CLNREVSTAT ="X6" ,CLNSIGCONF = "X7",MC = "X8", CLNVC = "X9", CLNHGVS = "X10") #%>%
+
+ClinVar_DB$Chr <- as.character(ClinVar_DB$Chr)
+joined_df6$Chr <- as.character(joined_df6$Chr)
+
+joined_df7 <- left_join(joined_df6, ClinVar_DB, by = c("GRCh38Location", "Ref", "Alt", "Chr")) %>%
+  unique()
+
+##> unique(joined_df7$CLNSIG)
+##[1] NA                                             "Uncertain_significance"                      
+##[3] "Likely_benign"                                "Benign"                                      
+##[5] "Conflicting_interpretations_of_pathogenicity" "Benign/Likely_benign"  
+
+
+write.csv(joined_df7,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df7.csv")
+## joined_df7 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df7.csv", header = TRUE, row.names = 1)
+
+#joined_df7$Protein_Change <- trimws(joined_df7$Protein_Change)
+
+## Cancer Hotspots
+Cancer_HS <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/cancer_hotspots_v2.csv", sep = ";")
+
+Cancer_HS_1 <- Cancer_HS %>% rename( Gene = Hugo_Symbol ) %>%
+  dplyr:: select(Gene, Amino_Acid_Position, Mutation_Count, Reference_Amino_Acid, 
+                 Total_Mutations_in_Gene, Variant_Amino_Acid, Codon_Change, Genomic_Position)
+
+## Cancer_HS_identifier = same Protein_Change
+## identifier = same position 
+# take first letter from "Reference_Amino_Acid"
+# + "Amino_Acid_Position" 
+# + "Variant_Amino_Acid" 
+# generate count 
+
+Cancer_HS_2 <- Cancer_HS_1 %>% 
+  mutate(Protein_Change = paste0(substr(Reference_Amino_Acid, 1, 1), 
+         Amino_Acid_Position, (substr(Variant_Amino_Acid, 1, 1)))) %>% ## same AA exchange and position
+  dplyr::select(Gene, Variant_Amino_Acid, Protein_Change) %>%
+  unique()
+
+
+Cancer_HS_3 <- Cancer_HS_1 %>% 
+  mutate(Protein_Change_Ref = paste0(substr(Reference_Amino_Acid, 1, 1), Amino_Acid_Position)) %>% ## Position 
+  dplyr::select(Gene, Mutation_Count, Protein_Change_Ref) %>%
+  rename(HS_Mutation_Count = Mutation_Count) %>% ## mutation count = all mutations at this position  
+  unique()
+
+
+joined_df8 <- left_join(joined_df7, Cancer_HS_2, by = c("Protein_Change", "Gene"))
+
+joined_df8.1 <- joined_df8 %>%
+  mutate(Protein_Change_Ref = substring(Protein_Change, 1, nchar(Protein_Change) - 1))
+
+
+
+joined_df8.2 <- left_join(joined_df8.1, Cancer_HS_3, by = c("Protein_Change_Ref", "Gene")) 
+
+## 3D Hotspots
+ThreeD_HS <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/3d_hotspots.csv", sep = ";", 
+                      check.names = FALSE ) %>%
+  dplyr::select(Gene, Residue, "#Mutations", "Class") %>%
+  rename(ThreeD_HS_Mutation_Count = "#Mutations", ThreeD_HS_Class = "Class", "Protein_Change_Ref" = Residue ) %>%
+  filter(ThreeD_HS_Class == "Hotspot-linked") %>% ## only keeping hotspot linked variants
+  unique()
+
+
+joined_df8.3 <- left_join(joined_df8.2, ThreeD_HS, by = c("Protein_Change_Ref", "Gene")) 
+
+
+## load gnomAD  
+GnomAD <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/gAD_exomes2.1.1_TSO500db_v2.0.csv", sep = ",")
+
+GnomAD_test <- GnomAD 
+GnomAD_test[,3:38] <- as.data.frame(sapply(GnomAD_test[,3:38],as.numeric))
+
+
+## identifier für GnomAD query 
+## Bsp. 1:27022920:C:A --> Chr:Pos:Ref:Alt
+create_identifier_offset <- function(data, chromosome, position, ref, alt) {
+  result <- data %>%
+    mutate(identifier = paste(chromosome, position+1, ref, alt, sep = ":"))
+  return(result)
+}
+
+# hg19 identifier  
+joined_df9 <- create_identifier_offset(joined_df8.3, joined_df8.3$Chr, joined_df8.3$GRCh37Location, joined_df8.3$Ref, joined_df8.3$Alt) %>%
+  left_join(., GnomAD_test, by = "identifier") %>%
+  unique()
+
+
+write.csv(joined_df9,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df9.csv")
+#joined_df9 <- read.csv("C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/joined_df9.csv", header = TRUE, row.names = 1)
+
+
+joined_df10 <- joined_df9 %>% 
+  mutate(cutoff_0.02 = ifelse(AF > 0.02, TRUE, FALSE))  ## ersetzt durch above_gnomAD_0.2per in Harmon. Skript
+
+write.csv(joined_df10,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df10.csv")
+##joined_df10 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df10.csv", header = TRUE, row.names = 1)
+
+##   mutate(is_first_exon = ifelse(GRCh37Location >= exon_chrom_start & GRCh37Location <= exon_chrom_end, TRUE, FALSE)) %>% 
+
+
+
+
+## assessment and reviewer status 2x in DB; cross-check necessary
+
+## First remove "-" to be able to make a comparison
+joined_df10$CLNSIG <-str_replace_all(joined_df10$CLNSIG,"_"," ")
+joined_df10$CLNREVSTAT <-str_replace_all(joined_df10$CLNREVSTAT,"_"," ")
+joined_df10$CLNSIGCONF <-str_replace_all(joined_df10$CLNSIGCONF,"_"," ")
+joined_df10$Clin_Sign_ClinVar <-str_replace_all(joined_df10$Clin_Sign_ClinVar,"_"," ")
+#joined_df10$Clin_Sign_ClinVar <-str_replace(joined_df10$Clin_Sign_ClinVar,"|","")
+joined_df10$Clin_Sign_ClinVar <-str_trim(joined_df10$Clin_Sign_ClinVar)
+
+## remove "last reviewed" 
+joined_df10$Clin_Sign_ClinVar <- gsub("\\([^\\)]+\\)", "", joined_df10$Clin_Sign_ClinVar)
+
+
+## test for deviations between clinvar classif. from different sources
+joined_df10 <- joined_df10 %>%
+  mutate(CLNSIG_TRUE = ifelse(Clin_Sign_ClinVar == CLNSIG, TRUE, FALSE)) %>%
+  mutate(CLNREVSTAT_TRUE = ifelse(Review.status == CLNREVSTAT, TRUE, FALSE))
+
+test_CLNSIG <- joined_df10 %>%
+  filter (CLNSIG_TRUE == FALSE)%>%
+  dplyr::select(Gene, Clin_Sign_ClinVar, CLNSIG, CLNSIG_TRUE)
+
+## Deviations caused by:
+# 1. Representation in Conflicting interpretations of pathogenicity
+# 2. Evaluation updated over time, supplemented, entries do not contradict each other
+
+
+test_CLNREVSTAT <- joined_df10 %>%
+  filter (CLNREVSTAT_TRUE == FALSE) %>%
+  dplyr::select(Gene, Review.status, CLNREVSTAT, CLNREVSTAT_TRUE)
+
+# chooese recent ClinVar information 
+# except it is NA, then keep alternative (Clin_Sign.., Review.status)
+
+
+joined_df10$CLNSIG_merge <- ifelse(!is.na(joined_df10$CLNSIG),joined_df10$CLNSIG, joined_df10$Clin_Sign_ClinVar)
+
+joined_df10$CLNREVSTAT_merge <- ifelse(!is.na(joined_df10$CLNREVSTAT),joined_df10$CLNREVSTAT, joined_df10$Review.status)
+
+test_merge <- filter(joined_df10, is.na(CLNSIG_merge))
+
+test_merge1 <- joined_df10 %>% filter(CLNSIG_merge == "")
+
+test_merge2 <- filter(joined_df10, is.na(CLNREVSTAT_merge))
+
+
+non_overlap <- anti_join(test_merge2, test_merge1)
+# all 3 variants have no RevStat 
+
+joined_df11 <- joined_df10 %>%
+  dplyr::  select(-c(Review.status, Clin_Sign_ClinVar, CLNSIG_TRUE, CLNREVSTAT_TRUE, CLNSIG_merge, CLNREVSTAT_merge))
+
+
+write.csv(joined_df11,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df11.csv")
+
+joined_df11 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df11.csv", 
+                        row.names = 1) %>% unique()
+
+
+
+##################################################################################
+## count annotations fro variants per DB
+
+#OKB_Ref - joined_df_4
+joined_df5 <- joined_df5 %>%
+  mutate(Oncogenic = ifelse(Oncogenic == "" | Oncogenic == 0, NA, Oncogenic))
+
+nrow(joined_df5) - sum(is.na(joined_df5$Oncogenic)) ##--> 948/3178 == is_oncogenic
+nrow(joined_df5) - sum(is.na(joined_df5$Mutation.Effect)) ##--> 948/3178 == Mutation.Effect
+
+#OKB_cancer_genes - joined_df_5
+sum(joined_df5$Is_Oncogene == "Yes") ## 374 oncogene variants
+
+sum(joined_df5$Is_Tumor_Suppressor_Gene == "Yes") ## 2804 TS gene variants
+
+##LSDB TP53 - joined_df6
+nrow(joined_df6) - sum(is.na(joined_df6$TransactivationClass)) # --> 753/755 TP53
+nrow(joined_df6) - sum(is.na(joined_df6$DNE_LOFclass)) # --> 753/755
+
+count_TP53 <- joined_df6 %>% filter (Gene == "TP53") %>% 
+  dplyr::select(Gene, TransactivationClass) #755
+
+sum(is.na(count_TP53$TransactivationClass)) ## 2 NA 
+
+
+##ClinVar - joined_df7: Clin_Sign_ClinVar,CLNRVSTAT, CLNSIG 
+nrow(joined_df7) - sum(is.na(joined_df7$CLNSIG)) ## 2449
+nrow(joined_df7) - sum(is.na(joined_df7$CLNREVSTAT)) ## 2449
+nrow(joined_df7) - sum(is.na(joined_df7$Clin_Sign_ClinVar))## 3178, hier sind aber leere Einträge die keine NAs sind
+##  .. Varianten haben keinen reviewer status
+
+
+nrow(joined_df7) - sum(is.na(joined_df7$Clin_Sign_ClinVar)) ## 3178
+nrow(joined_df7) - sum(is.na(joined_df7$Review.status)) ## 1399
+
+
+##Cancer HS - joined_df8
+nrow(joined_df8.2) - sum(is.na(joined_df8.2$HS_Mutation_Count)) ## 880
+
+nrow(joined_df8.3) - sum(is.na(joined_df8.3$ThreeD_HS_Mutation_Count)) ## 230
+
+
+
+#Gnom_AD - total AF,hom, AF_ethn - joined_df9
+joined_df9 <- joined_df9 %>%
+  mutate(AF = ifelse(AF == "" | AF == 0, NA, AF)) %>%
+  mutate(nhomalt = ifelse(nhomalt == "" | nhomalt == 0, NA, nhomalt))
+
+nrow(joined_df9) - sum(is.na(joined_df9$AF)) # --> 99 AF total
+
+nrow(joined_df9) - sum(is.na(joined_df9$nhomalt)) # --> 2 hom total
+
+## für other subpopulations/ethnicities
+nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe_seu)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe_bgr)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_afr)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_sas)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe_onf)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_amr)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_eas)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe_swe)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe_nwe)) #125
+#nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe_nwe)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_eas_jpn)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_eas_kor)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_eas_oea)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe_est)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_nfe)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_fin)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_asj)) #125
+nrow(joined_df9) - sum(is.na(joined_df9$AF_oth)) #125
+
+###################################################### END BiomaRt_Abfrage_V2.R
+
+## START BiomaRt_Harmon_Pathog._V2.R ###########################################
+## harmonize pathogenicity scoring from different DBs to implement In-House Algorithm
+
+# NA/Resistance (OKB) 0  --> mutation effect == inconclusive
+# B 1
+# LB 2
+# VUS 3
+# LP 4
+# P 5
+
+## Note: In-House Algorithm cannot be applied to secondary resistance mutations
+ ## how to differentiate between primary and secondary? discuss
+
+## Rule: LSDB (ISB TP53) trumps other DBs
+
+# joined_df11 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df11.csv", header = TRUE, row.names = 1)
+
+# DB OncoKB: pathogenicity annotations
+OKB_Ref <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/OKB_Ref.csv", sep = ";")
+
+OKB_Ref <- OKB_Ref %>%
+  rename(Protein_Change = Alteration, Gene = Gen)
+
+joined_df11$Oncogenic <- ifelse(is.na(joined_df11$Oncogenic), "0",
+                         ifelse(joined_df11$Oncogenic == "Neutral", "1",
+                         ifelse(joined_df11$Oncogenic == "Likely Neutral", "2",
+  ifelse(joined_df11$Oncogenic == "Inconclusive" | joined_df11$Oncogenic == "Resistance", "3",
+  ifelse(joined_df11$Oncogenic == "Likely Oncogenic", "4",
+  ifelse(joined_df11$Oncogenic == "Oncogenic", "5", joined_df11$Oncogenic))))))
+
+# ClinVar - assign numeric values
+#unique(joined_df11$CLNSIG)
+#[1] "Likely benign" 2                                                     
+#[2] "Uncertain significance"  3                                            
+#[3] "Conflicting interpretations of pathogenicity"  3                      
+#[4] "Benign"           1                                                   
+#[5] "Pathogenic"        5                                                  
+#[6] "Pathogenic/Likely pathogenic"   4                                     
+#[7] "other"                          0                                     
+#[8] "Uncertain significance|other"    3                                   
+#[9] "Likely pathogenic"               4                                 
+#[10] "not provided"                    0                                  
+#[11] "Benign/Likely benign"             2                                 
+#[12] "Conflicting interpretations of pathogenicity|association|risk factor" 3
+#[13] NA    0                                                               
+#[14] "Uncertain significance|drug response"      3                          
+#[15] "Pathogenic/Likely pathogenic|drug response"    4                   
+#[16] "Likely risk allele"               0                                   
+#[17] "drug response"               6        
+
+## Likely risk allele	As recommended by ClinGen for variants with 
+## decreased penetrance for Mendelian conditions.
+
+## works, NAs generated, replace by 0  
+
+joined_df11$CLNSIG <- ifelse(
+  is.na(joined_df11$CLNSIG) | joined_df11$CLNSIG == "not provided" | joined_df11$CLNSIG == "Likely risk allele", 0,
+  ifelse(joined_df11$CLNSIG == "Benign", 1,
+  ifelse(
+    joined_df11$CLNSIG == "Likely benign" | joined_df11$CLNSIG == "Benign/Likely benign", 2,
+  ifelse(
+    joined_df11$CLNSIG == "Conflicting interpretations of pathogenicity" | 
+    joined_df11$CLNSIG == "other" | 
+    joined_df11$CLNSIG == "Uncertain significance" | 
+    joined_df11$CLNSIG == "Uncertain significance|other" | 
+    joined_df11$CLNSIG == "Conflicting interpretations of pathogenicity|association|risk factor" |
+    joined_df11$CLNSIG == "Uncertain significance|drug response", 3,
+   ifelse(
+    joined_df11$CLNSIG == "Likely pathogenic" | joined_df11$CLNSIG == "Pathogenic/Likely pathogenic" | 
+    joined_df11$CLNSIG == "Pathogenic/Likely pathogenic|drug response", 4,
+  ifelse(joined_df11$CLNSIG == "Pathogenic", 5, 
+  ifelse(joined_df11$CLNSIG == "drug response", 6, NA
+                      )))))))
+        
+
+joined_df11$CLNSIG <- as.numeric(joined_df11$CLNSIG)
+
+
+## combine with REVSTAT (reviewer status)), In-House ALgorithm relies on >= 1/4* 
+#> unique(joined_df11$CLNREVSTAT)
+#[1] "criteria provided, single submitter"    1             
+#[2] "criteria provided, multiple submitters, no conflicts" 2
+#[3] "no assertion criteria provided"   0                   
+#[4] "reviewed by expert panel"    3                        
+#[5] "criteria provided, conflicting interpretations"   1   
+#[6] "no assertion provided"  0                             
+#[7] NA  0
+
+joined_df11$CLNREVSTAT <- ifelse(is.na(joined_df11$CLNREVSTAT),0,
+         ifelse(joined_df11$CLNREVSTAT == "criteria provided, single submitter" | 
+                joined_df11$CLNREVSTAT == "criteria provided, conflicting interpretations", 1,
+         ifelse(joined_df11$CLNREVSTAT == "criteria provided, multiple submitters, no conflicts", 2,
+         ifelse(joined_df11$CLNREVSTAT == "reviewed by expert panel", 3, 0 ))))
+                                                      
+
+## mutate new column for CLNSIG, where CLNREVSTAT >= 1, otherwise 0 
+joined_df12 <- joined_df11 %>%
+  mutate("CLNSIG_REV_1-4" = ifelse(CLNREVSTAT >= 1, CLNSIG, 0))
+
+
+# ISB-TP53 DB     
+
+unique(joined_df12$TransactivationClass)
+#[1] "functional"  1, "partially functional" 3, "non-functional" 5,  "supertrans"    5,      NA  
+
+NA_TP53 <- joined_df12 %>% 
+  filter (is.na(TransactivationClass)) ## NAs valid, checked website
+
+TP53 <-  joined_df12 %>% filter(Gene == "TP53") %>%
+  dplyr::select(TransactivationClass, DNE_LOFclass, AGVGDClass) 
+
+TP53_Transact_DNE_LOF <-  joined_df12 %>% filter(Gene == "TP53") %>%
+  dplyr:: select(TransactivationClass, DNE_LOFclass) %>%
+  unique()
+
+TP53_transact <- TP53 %>%
+  filter(TransactivationClass == "supertrans")
+
+joined_df13 <- joined_df12 %>% 
+  mutate(TP53_pathogenic = ifelse(is.na(joined_df12$TransactivationClass) &
+                                    is.na(joined_df12$DNE_LOFclass),0,
+                                  ifelse(joined_df12$TransactivationClass == "functional" 
+                                         & joined_df12$DNE_LOFclass ==  "notDNE_notLOF" |
+                                           joined_df12$TransactivationClass == "supertrans"
+                                         & joined_df12$DNE_LOFclass ==  "notDNE_notLOF" | 
+                                           joined_df12$TransactivationClass == "functional" 
+                                         & joined_df12$DNE_LOFclass == "unclass.", 1, 
+                                         ifelse(joined_df12$TransactivationClass == "non-functional"
+                                                &joined_df12$DNE_LOFclass == "notDNE_LOF" |
+                                                  joined_df12$TransactivationClass == "non-functional"
+                                                &joined_df12$DNE_LOFclass == "DNE_LOF" |
+                                                  joined_df12$TransactivationClass == "non-functional" 
+                                                & joined_df12$DNE_LOFclass == "unclass.", 5, 3
+                                                
+                                                
+                                         ))))
+
+
+write.csv(joined_df13,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df13.csv")
+#joined_df13 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df13.csv", header = TRUE, row.names = 1, check.names = FALSE)
+
+## harmoize 3 predictions methods from TP53 database
+#TransactivationClass  DNE_LOFclass
+#1              functional notDNE_notLOF B + B --> B          -1 x
+#4    partially functional notDNE_notLOF VUS + B --> VUS    -3
+#44         non-functional notDNE_notLOF P + B --> VUS      -3
+#82         non-functional    notDNE_LOF P + P --> P          -5 x
+#103  partially functional    notDNE_LOF VUS + P --> VUS    -3
+#108            supertrans notDNE_notLOF B + B --> B          -1 x
+#117            functional    notDNE_LOF B + P --> VUS      -3
+#170            functional      unclass. B + NA --> B         -1 x
+#191        non-functional       DNE_LOF P + P --> P          -5 x
+#193        non-functional      unclass. P + NA --> P         -5
+#210  partially functional      unclass. VUS + NA --> VUS   -3
+#230            supertrans      unclass.? + NA --> VUS      -3
+#268  partially functional       DNE_LOF  VUS + P --> VUS   -3
+#275            functional       DNE_LOF  B + P --> VUS     -3
+#588                  <NA>          <NA>         -->    NA    -0
+#1361           supertrans    notDNE_LOF
+
+
+### write function to check for allele frequency from gnomAD DB 
+## according to defined cutoffs in molecular pathology UKA 
+
+# function for above_gnomAD_0.2per (AF total) & above_subpop_1per
+gnomad_filter <- function(input){
+  temp1 <- input %>% mutate(above_gnomAD_0.2per = ifelse(AF >= 0.002, TRUE, FALSE))
+  temp2 <- temp1 %>% mutate(across(starts_with("AF_"), ~ case_when(.x > 0.01 ~ cur_column()), .names = "{.col}_new")) %>%
+    unite(above_subpop_1per, ends_with("_new"), na.rm = TRUE, sep = '; ')
+  temp3 <- temp2 %>% mutate(above_gnomAD_2per = ifelse(AF >= 0.02, TRUE, FALSE))
+  return(temp3)
+} ## Empty entries are currently saved as "" instead of NA
+
+# function for >= 2x hom  | n. hom  in GnomAD
+gnomad_nhomalt <- function(input){
+  temp1 <- input %>% mutate(global_nhomalt = ifelse(nhomalt >= 2, TRUE, FALSE))
+  return(temp1)
+}
+
+joined_df14 <- gnomad_filter(joined_df13)
+joined_df14 <- gnomad_nhomalt(joined_df14)
+
+
+colnames(joined_df14)
+#[1] "Gene"                     "Protein_Change"           "Ref"                      "Alt"                     
+#[5] "cDNA"                     "GRCh37Location"           "GRCh38Location"           "Canonical.SPDI"          
+#[9] "hg38_ID"                  "ensembl_transcript_id"    "transcript_is_canonical"  "ensembl_gene_id"         
+#[13] "Chr"                      "transcript_mane_select"   "identifier"               "identifier_1"            
+#[17] "is_first_exon"            "exon_chrom_start"         "exon_chrom_end"           "ensembl_exon_id"         
+#[21] "rank"                     "strand"                   "is_last_exon"             "is_exon_border"          
+#[25] "Oncogenic"                "Mutation.Effect"          "Is_Oncogene"              "Is_Tumor_Suppressor_Gene"
+#[29] "TransactivationClass"     "DNE_LOFclass"             "AGVGDClass"               "CLNSIG"                  
+#[33] "CLNREVSTAT"               "CLNSIGCONF"               "MC"                       "CLNVC"                   
+#[37] "CLNHGVS"                  "HS_Mutation_Count"        "ID"                       "FILTER"                  
+#[41] "AF"                       "nhomalt"                  "AF_nfe_seu"               "nhomalt_nfe_seu"         
+#[45] "AF_nfe_bgr"               "nhomalt_nfe_bgr"          "AF_afr"                   "nhomalt_afr"             
+#[49] "AF_sas"                   "nhomalt_sas"              "AF_nfe_onf"               "nhomalt_nfe_onf"         
+#[53] "AF_amr"                   "nhomalt_amr"              "AF_eas"                   "nhomalt_eas"             
+#[57] "AF_nfe_swe"               "nhomalt_nfe_swe"          "AF_nfe_nwe"               "nhomalt_nfe_nwe"         
+#[61] "AF_eas_jpn"               "nhomalt_eas_jpn"          "AF_eas_kor"               "nhomalt_eas_kor"         
+#[65] "AF_eas_oea"               "nhomalt_eas_oea"          "AF_nfe_est"               "nhomalt_nfe_est"         
+#[69] "AF_nfe"                   "nhomalt_nfe"              "AF_fin"                   "nhomalt_fin"             
+#[73] "AF_asj"                   "nhomalt_asj"              "AF_oth"                   "nhomalt_oth"             
+#[77] "cutoff_0.02"              "CLNSIG_REV_1.4"           "TP53_pathogenic"          "above_gnomAD_0.2per"     
+#[81] "above_subpop_1per"        "global_nhomalt"          
+
+ 
+joined_df15 <- joined_df14 %>%
+  dplyr ::select(-c("Canonical.SPDI", "hg38_ID","is_first_exon", "exon_chrom_start", "transcript_is_canonical",
+                    "ensembl_gene_id", "exon_chrom_end", "ensembl_exon_id", "rank","strand",
+                    "is_last_exon", "is_exon_border", "AF_nfe_seu", "nhomalt_nfe_seu",         
+                    "AF_nfe_bgr", "nhomalt_nfe_bgr", "AF_afr", "nhomalt_afr",
+                    "AF_sas", "nhomalt_sas", "AF_nfe_onf", "nhomalt_nfe_onf",
+                    "AF_amr","nhomalt_amr","AF_eas", "nhomalt_eas", "AF_nfe_swe",
+                    "nhomalt_nfe_swe", "AF_nfe_nwe", "nhomalt_nfe_nwe", "AF_eas_jpn",
+                    "nhomalt_eas_jpn", "AF_eas_kor", "nhomalt_eas_kor", "AF_eas_oea",
+                    "nhomalt_eas_oea", "AF_nfe_est", "nhomalt_nfe_est", "AF_nfe",
+                    "nhomalt_nfe", "AF_fin", "nhomalt_fin", "AF_asj", "nhomalt_asj",
+                    "AF_oth", "nhomalt_oth", "ID", "ThreeD_HS_Class", "FILTER", "MC", "cutoff_0.02"))      
+
+
+write.csv(joined_df15,"C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df15.csv")
+#joined_df15 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df15.csv", 
+#    row.names = 1, check.names = FALSE)
+
+## START Calling_Class_V2.R ####################################################
+
+## Pre-filtering of variants AF >2% - Polymorphisms
+# above above_gnomAD_2per == TRUE 
+
+Polymorph <- joined_df15 %>% filter(above_gnomAD_2per == TRUE) ## 8/33015
+
+joined_df15 <- joined_df15 %>% 
+  filter(above_gnomAD_2per == FALSE | is.na(above_gnomAD_2per))
+
+
+
+### How to Bioinformatics - 2.1.2024 - LS
+calling_class <- function(input) {
+  input_small <- input %>% 
+    dplyr::select('Oncogenic', 'CLNSIG_REV_1-4', 'TP53_pathogenic') 
+  
+  input_small <- input_small %>% 
+    mutate(count_B = (rowSums(.[, 1:3] == '1') + rowSums(.[, 1:3] == '2')))
+  
+  input_small <- input_small %>% 
+    mutate(count_P = (rowSums(.[, 1:3] == '4') + rowSums(.[, 1:3] == '5')))
+  
+  input_small <- input_small %>% 
+    mutate(count_VUS = (rowSums(.[, 1:3] == '3')))
+  
+  input_small <- input_small %>% 
+    dplyr:: select(count_B, count_P, count_VUS)
+  
+  input_small <- input_small %>% 
+    bind_cols(input, .) %>%  # '.' to refer to the previous result (input_small)
+    mutate(class_call = ifelse(TP53_pathogenic == 5 & count_B == 0, 'Class4-5',
+                       ifelse(TP53_pathogenic == 1 & count_P == 0, 'Class2',  
+                     ifelse(
+                     (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_B >= 2 & count_P == 0 & count_VUS == 0,
+                     "Class2",
+                   ifelse(
+                  (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_B >= 2 & count_P == 1 & count_VUS == 0,
+                  "Class2-3_Caution",
+                ifelse(
+               (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_B >= 2 & count_P == 0 & count_VUS == 1,
+               "Class2-3",
+             ifelse(
+             (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_P == 0 & count_VUS >= 1,
+            "Class2-3",
+            ifelse(
+           (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt != TRUE & count_P == 0 & count_B >= 1,
+           "Class2-3",
+          ifelse(
+         (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 0 & count_B >= 2,
+          "Class2-3",
+        ifelse(
+       (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 0 & count_B == 1 & CLNREVSTAT >= 2,
+       "Class2-3",
+     ifelse(
+     (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 0,
+    "Class3",
+   ifelse(
+  (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P >= 1 & count_B >= 1,  
+ "Class3",
+  ifelse(
+ (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 1 & count_B == 0 & (HS_Mutation_Count >= 10 | ThreeD_HS_Mutation_Count >= 10),
+ "Class4-5_HS", 
+ifelse(
+ (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P >= 2 & count_B == 0 & (HS_Mutation_Count >= 10 | ThreeD_HS_Mutation_Count >= 10), 
+ "Class4-5_HS",  "Class4-5" ))))))))))))))
+                                                          
+                            
+    input_small <- input_small %>% 
+    mutate(Caution_Foundereffect = ifelse(above_subpop_1per == "AF_asj" | above_subpop_1per == "AF_fin", TRUE, FALSE))
+  
+  return(input_small)
+}
+
+joined_df15 <-  joined_df15 %>% replace(is.na(.), FALSE)  ## remove NAs  ## input df must be free of NAs for columns of interest
+
+calling_class_df <- calling_class(joined_df15)
+calling_class_df_2 <- calling_class_df %>%  mutate(class_call = str_replace_all(class_call, "Class4-5_HS", "Class4-5"))
+
+write.csv(calling_class_df, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/calling_class.csv")
+write.csv(calling_class_df_2, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/calling_class_df_2.csv")
+
+#calling_class_df <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/calling_class.csv")
+
+## count classes
+calling_class_df_grouped_1 <- calling_class_df %>% group_by(class_call)
+count_class_1 <- summarise(calling_class_df_grouped_1, count = n())
+write.csv(count_class_1, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/count_class_1.csv")
+
+## count class where Class4-5 and class Class4-5_HS is summarized
+## count of classes called by automated In-House ALgorithm - BUT Class4-5 and Class4-5_HS summarized
+## this diferentation is not relevant for benchmarking process, CGI only differentiates between
+## oncogenic - driver and non-oncogenic - passenger 
+## therefore for further analysis: count_class_2 will be used as input data 
+calling_class_grouped_2 <-calling_class_df_2 %>% group_by(class_call)
+
+count_class_2 <- calling_class_grouped_2 #%>% anti_join(., calling_class_df_no_protein, by = c("Gene","Chr", "Ref", "Alt", "GRCh38Location") ) 
+count_class_2 <-  summarise(calling_class_grouped_2, count = n())     ## aus CGI Benchmarking Skript (z.64)
+
+
+
+write.csv(count_class_2, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/count_class_2.csv")
+
+
+#############################################################################################################################
+## mock data for validation of  calling_class function
+install.packages("openxlsx", dependencies = TRUE)
+library(openxlsx)
+
+mock_df <- joined_df15 %>% head(n = 30) %>%
+  dplyr:: select("Gene", "Protein_Change", "Ref", "Alt", "CLNSIG", "TP53_pathogenic", "Oncogenic", "CLNSIG_REV_1-4", 
+                 "Is_Oncogene", "Is_Tumor_Suppressor_Gene", "TransactivationClass",  "DNE_LOFclass",            
+                 "AGVGDClass", "CLNREVSTAT", "HS_Mutation_Count", "ThreeD_HS_Mutation_Count", "AF", "nhomalt", 
+                 "above_gnomAD_0.2per", "above_subpop_1per", "above_gnomAD_2per", "global_nhomalt")
+#'Oncogenic', 'CLNSIG_REV_1-4', 'TP53_pathogenic'
+
+write.xlsx(mock_df, "C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/mock_df.xlsx")
+## modify in excel and re-load
+
+mock_df_bearbeitet <-  read.xlsx("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/mock_df_bearbeitet.xlsx")
+
+
+mock_df_calling_class <- calling_class(mock_df_bearbeitet) ## looks correct
+
+
+
+nrow(calling_class_df) - sum(is.na(calling_class_df$Class2))
+
+####################################################################### End ## Vorfilterung AF >2% - Polymorphismen
+# above above_gnomAD_2per == TRUE 
+
+Polymorph <- joined_df15 %>% filter(above_gnomAD_2per == TRUE) ## 
+
+joined_df15 <- joined_df15 %>% 
+  filter(above_gnomAD_2per == FALSE | is.na(above_gnomAD_2per))
+
+
+
+### How to Bioinformatics - 2.1.2024 - LS
+
+calling_class <- function(input) {
+  input_small <- input %>% 
+    dplyr::select('Oncogenic', 'CLNSIG_REV_1-4', 'TP53_pathogenic') 
+  
+  input_small <- input_small %>% 
+    mutate(count_B = (rowSums(.[, 1:3] == '1') + rowSums(.[, 1:3] == '2')))
+  
+  input_small <- input_small %>% 
+    mutate(count_P = (rowSums(.[, 1:3] == '4') + rowSums(.[, 1:3] == '5')))
+  
+  input_small <- input_small %>% 
+    mutate(count_VUS = (rowSums(.[, 1:3] == '3')))
+  
+  input_small <- input_small %>% 
+   dplyr:: select(count_B, count_P, count_VUS)
+  
+  input_small <- input_small %>% 
+    bind_cols(input, .) %>%  # '.' to refer to the previous result (input_small)
+    mutate(class_call = ifelse(TP53_pathogenic == 5 & count_B == 0, 'Class4-5',
+                               ifelse(TP53_pathogenic == 1 & count_P == 0, 'Class2', 
+                                      ifelse(
+                                        (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_B >= 2 & count_P == 0 & count_VUS == 0,
+                                        "Class2",
+                                        ifelse(
+                                          (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_B >= 2 & count_P == 1 & count_VUS == 0,
+                                          "Class2-3_Caution",
+                                          ifelse(
+                                            (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_B >= 2 & count_P == 0 & count_VUS == 1,
+                                            "Class2-3",
+                                            ifelse(
+                                              (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt == TRUE & count_P == 0 & count_VUS >= 1,
+                                              "Class2-3",
+                                              ifelse(
+                                                (above_gnomAD_0.2per == TRUE | above_subpop_1per != "") & global_nhomalt != TRUE & count_P == 0 & count_B >= 1,
+                                                "Class2-3",
+                                                ifelse(
+                                                  (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 0 & count_B >= 2,
+                                                  "Class2-3",
+                                                  ifelse(
+                                                    (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 0 & count_B == 1 & CLNREVSTAT >= 2,
+                                                    "Class2-3",
+                                                    ifelse(
+                                                      (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 0,
+                                                      "Class3",
+                                                      ifelse(
+                                                        (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P >= 1 & count_B >= 1, 
+                                                        "Class3",
+                                                        ifelse(
+                                                          (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P == 1 & count_B == 0 & (HS_Mutation_Count >= 10 | ThreeD_HS_Mutation_Count >= 10),
+                                                          "Class4-5_HS", 
+                                                          ifelse(
+                                                            (above_gnomAD_0.2per != TRUE | above_subpop_1per == "") & global_nhomalt != TRUE & count_P >= 2 & count_B == 0 & (HS_Mutation_Count >= 10 | ThreeD_HS_Mutation_Count >= 10), 
+                                                            "Class4-5_HS",
+                                                            "Class4-5"
+                                                          )
+                                                        )
+                                                      )
+                                                    )
+                                                  )
+                                                )
+                                              )
+                                            )
+                                          )
+                                        )
+                                      ))))
+  
+  input_small <- input_small %>% 
+    mutate(Caution_Foundereffect = ifelse(above_subpop_1per == "AF_asj" | above_subpop_1per == "AF_fin", TRUE, FALSE))
+  
+  return(input_small)
+}
+
+joined_df15 <-  joined_df15 %>% replace(is.na(.), FALSE)  ## remove NAs  ## input df must be free of NAs for columns of interest
+  
+calling_class_df <- calling_class(joined_df15)
+calling_class_df_2 <- calling_class_df %>%  mutate(class_call = str_replace_all(class_call, "Class4-5_HS", "Class4-5"))
+
+write.csv(calling_class_df, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/calling_class.csv")
+write.csv(calling_class_df_2, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/calling_class_df_2.csv")
+
+#calling_class_df <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/calling_class.csv")
+
+## count classes
+calling_class_df_grouped_1 <- calling_class_df %>% group_by(class_call)
+count_class_1 <- summarise(calling_class_df_grouped_1, count = n())
+write.csv(count_class_1, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/count_class_1.csv")
+
+## count class where Class4-5 and class Class4-5_HS is summarized
+## count of classes called by automated In-House ALgorithm - BUT Class4-5 and Class4-5_HS summarized
+## this diferentation is not relevant for benchmarking process, CGI only differentiates between
+## oncogenic - driver and non-oncogenic - passenger 
+## therefore for further analysis: count_class_2 will be used as input data 
+calling_class_grouped_2 <-calling_class_df_2 %>% group_by(class_call)
+
+count_class_2 <- calling_class_grouped_2
+  count_class_2 <-  summarise(calling_class_grouped_2, count = n())     ## see CGI Benchmarking Skript (line 64)
+
+
+
+write.csv(count_class_2, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/count_class_2.csv")
+
+
+#############################################################################################################################
+## mock data for validation of  calling_class function
+install.packages("openxlsx", dependencies = TRUE)
+library(openxlsx)
+
+mock_df <- joined_df15 %>% head(n = 30) %>%
+           dplyr:: select("Gene", "Protein_Change", "Ref", "Alt", "CLNSIG", "TP53_pathogenic", "Oncogenic", "CLNSIG_REV_1-4", 
+                   "Is_Oncogene", "Is_Tumor_Suppressor_Gene", "TransactivationClass",  "DNE_LOFclass",            
+                  "AGVGDClass", "CLNREVSTAT", "HS_Mutation_Count", "ThreeD_HS_Mutation_Count", "AF", "nhomalt", 
+                  "above_gnomAD_0.2per", "above_subpop_1per", "above_gnomAD_2per", "global_nhomalt")
+#'Oncogenic', 'CLNSIG_REV_1-4', 'TP53_pathogenic'
+
+write.xlsx(mock_df, "C:/Users/user/Documents/RWTH/Masterarbeit/Variantenbewertung_und_Benchmarking/Output/mock_df.xlsx")
+          ## modify in excel and re-load
+
+
+mock_df_bearbeitet <-  read.xlsx("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/mock_df_bearbeitet.xlsx")
+
+
+mock_df_calling_class <- calling_class(mock_df_bearbeitet) ## validated
+
+nrow(calling_class_df) - sum(is.na(calling_class_df$Class2))
+
+###################################################### END Calling_Class_V2.R ##
+
+## CGI_Benchmarking_V2.R #######################################################
+
+## Abfrage von joined_df
+joined_df <- 
+  read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/joined_df.csv", 
+           row.names = 1) 
+
+CGI_joined_df <- joined_df %>%   dplyr :: select(Chr, GRCh38Location, Ref, Alt) %>% unique() %>%
+  rename(c(chr = Chr, Start = GRCh38Location, ref = Ref, alt = Alt))
+
+write.table(CGI_joined_df, 
+            file = "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/CGI_joined_df.txt", 
+            row.names = FALSE, 
+            #col.names = FALSE,  
+            sep = "\t", 
+            quote = FALSE)
+
+
+# import CGI analysis 
+CGI_analysis <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/alterations.tsv", sep =  "\t", check.names = FALSE,  row.names = 1) 
+
+#colnae##CGI_analysis_FAT1 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Input/Variantenbewertung/alterations_FAT1.tsv", sep =  "\t", check.names = FALSE,  row.names = 1) 
+
+unique(CGI_analysis$`CGI-Oncogenic Prediction`)
+## [1] "driver (oncodriveMUT)"                       "passenger (oncodriveMUT)"                    "driver (boostDM: non-tissue-specific model)" "non-protein affecting" 
+
+unique(CGI_analysis$`CGI-Oncogenic Summary`)
+## oncogenic (predicted)"               "non-oncogenic"                       "oncogenic (annotated)"               "oncogenic (predicted and annotated)" "non-protein affecting" 
+
+##In-HOUSE classification of variants
+calling_class_df_2 <- read.csv("C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/calling_class_df_2.csv",  row.names = 1) ## 
+
+
+## CGI classification of variants
+## CGI different transcript, Offset 2AS (+2) 
+CGI_analysis_1 <- CGI_analysis %>%
+  rename("Gene" = "CGI-Gene", "Protein_Change" = "CGI-Protein Change", "GRCh38Location"  = "POSITION", "Ref" = "REF", "Alt" = "ALT", "Chr" = "chr") %>%
+  dplyr :: select("Gene", "Protein_Change", "GRCh38Location", "Ref", "Alt", "Chr", "CGI-Oncogenic Summary", "CGI-Oncogenic Prediction", "CGI-External oncogenic annotation")
+
+
+CGI_analysis_1$Numeric_Position <- as.numeric(gsub("[^0-9]", "", CGI_analysis_1$Protein_Change))
+CGI_analysis_1$New_Numeric_Position <- ifelse(CGI_analysis_1$Gene == "FAT1", CGI_analysis_1$Numeric_Position - 2, CGI_analysis_1$Numeric_Position)
+
+
+CGI_analysis_1$Protein_Change <- mapply(
+  function(protein_change, new_position) {
+  },
+  CGI_analysis_1$Protein_Change,
+  CGI_analysis_1$New_Numeric_Position)
+
+CGI_analysis_1$Protein_Change <- as.character(CGI_analysis_1$Protein_Change)
+
+calling_class_df <- calling_class_df_2 %>% 
+  left_join(., CGI_analysis_1, by = c("Gene","Chr", "Ref", "Alt", "GRCh38Location")) %>%
+  filter(`CGI-Oncogenic Summary` != "non-protein affecting")  ## if non-codng variants present, filtered out
+###
+calling_class_df_no_protein <- anti_join(calling_class_df_2,calling_class_df,  by = c("Gene","Chr", "Ref", "Alt", "GRCh38Location")) ## dremove in in count_class script
+
+FINAL_CLASS <- calling_class_df %>%
+  mutate(Overlap = ifelse(class_call %in% c('Class4-5', 'Class4-5_HS') & `CGI-Oncogenic Summary` 
+                          %in% c("oncogenic (predicted)", "oncogenic (annotated)", "oncogenic (predicted and annotated)") | class_call == 'Class2' & 
+                            `CGI-Oncogenic Summary` %in% c("non-oncogenic", "non-protein affecting"), TRUE, FALSE)) %>% 
+  dplyr::select(- "Protein_Change.y") %>%
+  rename ("Protein_Change" =  "Protein_Change.x")
+
+write.csv(FINAL_CLASS, "C:/Users/zeynep/Documents/GitHub/Variantenbewertung_und_Benchmarking/Output/FINAL_CLASS.csv") # input: calling_class_df_2
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
