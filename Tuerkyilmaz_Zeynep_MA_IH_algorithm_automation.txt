@@ -523,10 +523,7 @@ exon_table_last_Exon <- exon_table %>%
 
 #########################################################################################################################
 
-## test schreiben für versch. Gene. Exon 1 unter Beachtung strang (+/-)
-##danach für letztes Exon (df mit # exons je Gen, durch ENST abrufbar)
-
-# Write test for genes. Note: Exon 1 considering strand (+/-), 
+## Write test for genes. Note: Exon 1 considering strand (+/-), 
 # then for the last exon (data frame with # exons per gene, retrievable by ENST)
 
 colnames(joined_df)
@@ -872,7 +869,6 @@ nrow(joined_df9) - sum(is.na(joined_df9$AF_oth)) #125
 # P 5
 
 ## Note: In-House Algorithm cannot be applied to secondary resistance mutations
- ## how to differentiate between primary and secondary? discuss
 
 ## Rule: LSDB (ISB TP53) trumps other DBs
 
